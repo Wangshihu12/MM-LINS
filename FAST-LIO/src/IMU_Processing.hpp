@@ -214,56 +214,71 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
 }
 
 void ImuProcess::IMU_init_dynamic(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom>&kf_state, int &N, esekfom::esekf<state_ikfom, 12, input_ikfom>&kf_point)
-  {
-    V3D cur_acc, cur_gyr;
+{
+    V3D cur_acc, cur_gyr;                    // 当前帧的加速度和角速度
     
+    // 1. 第一帧处理：重置所有参数并初始化
     if (b_first_frame_)  
     {
-      Reset();   
-      N = 1;       
-      b_first_frame_ = false;
-      const auto &imu_acc = meas.imu.front()->linear_acceleration;  
-      const auto &gyr_acc = meas.imu.front()->angular_velocity;       
-      mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;    
-      mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;        
-      first_lidar_time = meas.lidar_beg_time;                 
+        Reset();                             // 重置IMU处理器的所有内部状态
+        N = 1;                               // 初始化计数器为1
+        b_first_frame_ = false;              // 标记已处理第一帧
+        
+        // 获取第一帧IMU数据作为初始值
+        const auto &imu_acc = meas.imu.front()->linear_acceleration;    // 第一帧加速度数据
+        const auto &gyr_acc = meas.imu.front()->angular_velocity;       // 第一帧角速度数据
+        mean_acc << imu_acc.x, imu_acc.y, imu_acc.z;                   // 初始化加速度均值
+        mean_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;                   // 初始化角速度均值
+        first_lidar_time = meas.lidar_beg_time;                         // 记录第一帧激光雷达时间
     }
+    
+    // 2. 遍历当前测量组中的所有IMU数据，计算统计量
     for (const auto &imu : meas.imu)  
     {
-      const auto &imu_acc = imu->linear_acceleration;
-      const auto &gyr_acc = imu->angular_velocity;
-      cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;
-      cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;
-      mean_acc      += (cur_acc - mean_acc) / N;
-      mean_gyr      += (cur_gyr - mean_gyr) / N;  
-      cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (N - 1.0) / (N * N);
-      cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
-      N ++;
+        // 提取当前IMU数据
+        const auto &imu_acc = imu->linear_acceleration;
+        const auto &gyr_acc = imu->angular_velocity;
+        cur_acc << imu_acc.x, imu_acc.y, imu_acc.z;                    // 当前加速度向量
+        cur_gyr << gyr_acc.x, gyr_acc.y, gyr_acc.z;                    // 当前角速度向量
+        
+        // 3. 在线更新均值（增量式计算）
+        mean_acc += (cur_acc - mean_acc) / N;                          // 更新加速度均值
+        mean_gyr += (cur_gyr - mean_gyr) / N;                          // 更新角速度均值
+        
+        // 4. 在线更新协方差矩阵（增量式计算）
+        cov_acc = cov_acc * (N - 1.0) / N + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (N - 1.0) / (N * N);
+        cov_gyr = cov_gyr * (N - 1.0) / N + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (N - 1.0) / (N * N);
+        
+        N++;                                                            // 增加样本计数
     }
 
+    // 5. 状态恢复：从退化前的参考状态恢复关键参数
+    state_ikfom init_state = kf_state.get_x();                         // 获取当前状态作为基础
+    init_state.grav = kf_point.get_x().grav;                           // 恢复重力向量（从退化前状态）
+    
+    init_state.bg = kf_point.get_x().bg;                               // 恢复陀螺仪偏置
+    init_state.ba = kf_point.get_x().ba;                               // 恢复加速度计偏置
+    // init_state.pos(2) = kf_point.get_x().pos(2);                    // 可选：恢复Z方向位置
+    init_state.offset_T_L_I = kf_point.get_x().offset_T_L_I;          // 恢复LiDAR-IMU平移外参
+    init_state.offset_R_L_I = kf_point.get_x().offset_R_L_I;          // 恢复LiDAR-IMU旋转外参
+    kf_state.change_x(init_state);                                     // 应用恢复的状态到当前滤波器
 
-    state_ikfom init_state = kf_state.get_x();                       
-    init_state.grav = kf_point.get_x().grav;     
-
-    init_state.bg  = kf_point.get_x().bg;                                          
-    init_state.ba = kf_point.get_x().ba;
-    // init_state.pos(2) = kf_point.get_x().pos(2);
-    init_state.offset_T_L_I = kf_point.get_x().offset_T_L_I;      
-    init_state.offset_R_L_I = kf_point.get_x().offset_R_L_I;     
-    kf_state.change_x(init_state);                                    
-
-    esekfom::esekf<state_ikfom, 12, input_ikfom>::cov init_P = kf_state.get_P(); 
-    init_P.setIdentity();                                                                 
-    init_P(12, 12) = init_P(13, 13) = init_P(14, 14) = 1000;
-    init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;         
-    init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001; 
-    init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;  
-    init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;   
-    init_P(21,21) = init_P(22,22) = 0.00001;                             
-    kf_state.change_P(init_P);                                                       
-    last_imu_ = meas.imu.back();                                                 
-    cout<<"Try dynamic initialization!!!!!"<<endl;
-  }
+    // 6. 重新初始化协方差矩阵
+    esekfom::esekf<state_ikfom, 12, input_ikfom>::cov init_P = kf_state.get_P();  // 获取当前协方差矩阵
+    init_P.setIdentity();                                               // 设置为单位矩阵
+    
+    // 7. 为不同状态变量设置合适的初始协方差
+    init_P(12, 12) = init_P(13, 13) = init_P(14, 14) = 1000;          // 重力向量的不确定性（较大）
+    init_P(6,6) = init_P(7,7) = init_P(8,8) = 0.00001;               // 速度的不确定性（较小）
+    init_P(9,9) = init_P(10,10) = init_P(11,11) = 0.00001;           // 角速度偏置的不确定性（较小）
+    init_P(15,15) = init_P(16,16) = init_P(17,17) = 0.0001;          // 加速度偏置的不确定性（中等）
+    init_P(18,18) = init_P(19,19) = init_P(20,20) = 0.001;           // 外参平移的不确定性（中等）
+    init_P(21,21) = init_P(22,22) = 0.00001;                         // 外参旋转的不确定性（较小）
+    
+    kf_state.change_P(init_P);                                         // 应用新的协方差矩阵到滤波器
+    last_imu_ = meas.imu.back();                                       // 保存最后一个IMU数据
+    cout<<"Try dynamic initialization!!!!!"<<endl;                     // 输出动态初始化提示
+}
 
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {

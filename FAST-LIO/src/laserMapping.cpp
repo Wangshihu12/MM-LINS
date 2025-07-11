@@ -672,25 +672,42 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
 void re_slam()
 {
-    // flg_reset = true;
-    state_ikfom t;                    
-    state_point = t;
-    esekfom::esekf<state_ikfom, 12, input_ikfom> k;
-    kf = k;
-    double epsi[23] = {0.001};
-    fill(epsi, epsi + 23, 0.001);  
+    // flg_reset = true;  // 可选：设置重置标志位
+    
+    // 1. 重置状态估计器
+    state_ikfom t;                    // 创建一个新的状态对象（默认初始化）
+    state_point = t;                  // 将当前状态点重置为初始状态
+    
+    // 2. 重新初始化扩展卡尔曼滤波器
+    esekfom::esekf<state_ikfom, 12, input_ikfom> k;  // 创建新的EKF对象
+    kf = k;                          // 替换当前的卡尔曼滤波器
+    
+    // 3. 设置EKF的收敛阈值参数
+    double epsi[23] = {0.001};       // 定义23个状态变量的收敛阈值数组
+    fill(epsi, epsi + 23, 0.001);    // 将所有阈值设为0.001
+    // 初始化动态共享EKF，传入雅可比函数、观测模型、最大迭代次数和收敛阈值
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi); 
-    shared_ptr<ImuProcess> p_imu_new(new ImuProcess());
-    p_imu = p_imu_new;
-    p_imu->Reset();
-    memset(point_selected_surf, true, sizeof(point_selected_surf));
-    memset(res_last, -1000.0f, sizeof(res_last));
-    p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
-    p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
-    p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));
-    p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
-    p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));
-    ikdtree.clear();
+    
+    // 4. 重新初始化IMU处理器
+    shared_ptr<ImuProcess> p_imu_new(new ImuProcess());  // 创建新的IMU处理器对象
+    p_imu = p_imu_new;               // 替换当前的IMU处理器
+    p_imu->Reset();                  // 重置IMU处理器的内部状态
+    
+    // 5. 重置点云处理相关的数据结构
+    memset(point_selected_surf, true, sizeof(point_selected_surf));   // 重置面特征点选择标志数组
+    memset(res_last, -1000.0f, sizeof(res_last));                    // 重置残差数组为初始值
+    
+    // 6. 重新设置IMU-LiDAR外参
+    p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);          // 设置LiDAR相对于IMU的外参变换
+    
+    // 7. 重新设置IMU噪声协方差参数
+    p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));             // 设置陀螺仪噪声协方差
+    p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov));             // 设置加速度计噪声协方差
+    p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));  // 设置陀螺仪偏置噪声协方差
+    p_imu->set_acc_bias_cov(V3D(b_acc_cov, b_acc_cov, b_acc_cov));  // 设置加速度计偏置噪声协方差
+    
+    // 8. 清空增量式KD树地图
+    ikdtree.clear();                 // 清空所有地图点，重新开始建图
 }
 
 int main(int argc, char **argv)
@@ -881,65 +898,91 @@ int main(int argc, char **argv)
 
 
             /*** Debug variables ***/
-            Matrix<double, 23, 23> P_out_; 
-            P_out_ = kf.get_P();
-            key++;
-			auto h_out_ = (P_out_.template block<3,3>(0, 0)).eigenvalues().real();
-            H_OUT <<key<< " ";
+            // 1. 获取并分析协方差矩阵
+            Matrix<double, 23, 23> P_out_;           // 声明23x23的协方差矩阵
+            P_out_ = kf.get_P();                     // 从卡尔曼滤波器获取当前协方差矩阵
+            key++;                                   // 增加调试计数器
+            
+            // 2. 计算位置协方差的特征值（用于退化检测）
+            auto h_out_ = (P_out_.template block<3,3>(0, 0)).eigenvalues().real();  // 提取位置协方差的3x3子矩阵并计算其特征值
+            
+            // 3. 输出调试信息到文件
+            H_OUT <<key<< " ";                       // 输出帧计数
             for( int i=0; i<3; i++ ){
-                H_OUT<<h_out_(i)<< " ";         
+                H_OUT<<h_out_(i)<< " ";              // 输出三个特征值
             }
             H_OUT<<endl;
-            if(P_out_(0,0)>0.0006 || P_out_(1,1)>0.0006 || P_out_(2,2)>0.0005 ) 
+            
+            // 4. 退化检测：检查位置协方差的对角元素是否超过阈值
+            if(P_out_(0,0)>0.0006 || P_out_(1,1)>0.0006 || P_out_(2,2)>0.0005 )  // X,Y,Z方向的位置方差阈值检查
             {
-                isPublish = false;
-                isIMU_init_dynamic = true;
+                // 5. 检测到退化时的处理
+                isPublish = false;                   // 停止发布结果
+                isIMU_init_dynamic = true;           // 启用IMU动态初始化
+                
+                // 6. 第一次检测到退化时，保存最优的历史状态
                 if(getDegradationpre_point == 1)
                 {
-                    Degradationpre_point = kfqueue[0];
+                    Degradationpre_point = kfqueue[0];  // 初始化为队列中第一个状态
+                    // 遍历历史状态队列，找到协方差最小的状态作为退化前的参考点
                     for(int i = 1; i<kfQueLength; ++i){
-                        if(kfqueue[i].get_P()(22, 22) < Degradationpre_point.get_P()(22, 22)){Degradationpre_point = kfqueue[i];}
+                        if(kfqueue[i].get_P()(22, 22) < Degradationpre_point.get_P()(22, 22)){
+                            Degradationpre_point = kfqueue[i];  // 保存协方差最小的状态
+                        }
                     }
                 }
-                ++degradation_count;
-                ++getDegradationpre_point;
-                cout<<"Degeneracy has happened "<<degradation_count<<" times"<<endl;
-                // bool hasPubbuild = false;
+                
+                // 7. 更新退化计数
+                ++degradation_count;                 // 增加退化次数计数
+                ++getDegradationpre_point;           // 增加退化前点获取计数
+                cout<<"Degeneracy has happened "<<degradation_count<<" times"<<endl;  // 输出退化次数
+                
+                // 8. 严重退化处理（退化次数超过1次）
                 if( degradation_count > 1)
                 {
-                    
+                    // 重置建图状态标志
                     if(hasPubbuild)
                     {
-                        hasPubbuild = false;
+                        hasPubbuild = false;         // 重置建图发布标志
                     }
+                    
+                    // 发布休眠消息（只发布一次）
                     if (!hasPubsleep)
                     {
-                        // 发布消息
+                        // 发布系统进入休眠状态的消息
                         std_msgs::Bool issleeping;
                         issleeping.data = true;
-                        pubissleeping.publish(issleeping);
+                        pubissleeping.publish(issleeping);     // 发布休眠状态
                         cout<<"Over-degeneracy has happened, publish hibernating map operation!!!!!!!!!!!!!"<<endl;
-                        hasPubsleep = true;
+                        hasPubsleep = true;          // 设置已发布休眠消息标志
                     }
-                    degradation_count = 0;
-                    re_slam();
-                    continue;
+                    
+                    // 9. 重置系统并重新开始SLAM
+                    degradation_count = 0;           // 重置退化计数
+                    re_slam();                       // 调用重新SLAM函数，完全重置系统
+                    continue;                        // 跳过当前循环，重新开始
                 }
-            }else{
-                isPublish = true;
-                if(hasPubsleep){
-                    if (!hasPubbuild)
+            }
+            else{
+                // 10. 未检测到退化时的处理
+                isPublish = true;                    // 允许发布结果
+                
+                // 11. 从休眠状态恢复的处理
+                if(hasPubsleep){                     // 如果之前处于休眠状态
+                    if (!hasPubbuild)                // 如果还没有发布建图消息
                     {
                         cout<<"Over-degeneracy has disappear, construct a new map....................."<<endl;
-                        getDegradationpre_point = 0;
-                        isIMU_init_dynamic = false;
-                        isPublish = true;
+                        getDegradationpre_point = 0;      // 重置退化前点计数
+                        isIMU_init_dynamic = false;       // 关闭IMU动态初始化
+                        isPublish = true;                 // 允许发布结果
+                        
+                        // 发布开始建图消息
                         std_msgs::Bool isbuilding;
                         isbuilding.data = true;
-                        pubisbuilding.publish(isbuilding);
-                        hasPubbuild = true; 
+                        pubisbuilding.publish(isbuilding); // 发布正在建图状态
+                        hasPubbuild = true;               // 设置已发布建图消息标志
                     }
-                    hasPubsleep = false;
+                    hasPubsleep = false;                  // 清除休眠状态标志
                 }
             }
 
